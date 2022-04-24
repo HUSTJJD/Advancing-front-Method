@@ -1,0 +1,191 @@
+"""
+读取网格文件 进行数据提取
+以阵面的两个点为起点 深度为2/3进行搜索  组成一张图
+"""
+from math import sqrt
+import numpy as np
+#import torch_geometric
+import dgl
+import torch
+import networkx as nx
+import matplotlib.pyplot as plt
+import random
+file_path = "./grid/30p30n/30p30n-fine-hybrid.cas"
+grid_type = 1
+# file_path = "./grid/1.uns"
+Grid_stack = np.array([])
+AFT_stack = np.array([])
+Coord = np.array([])
+wallNodes = np.array([])
+
+
+np.set_printoptions(threshold=np.inf)
+torch.set_printoptions(profile="full")
+
+
+def read_file_cas(file_path, grid_type):
+    with open(file_path, 'r+') as f:
+        all_line = f.readlines()
+    list = []
+    face_pos = []
+    j = 0
+    for line in all_line:
+        line = line.split(' ')
+        for i in range(len(line)-1, -1, -1):
+            if line[i] == '':
+                line.remove('')
+        if line[0] == '(13':
+            face_pos.append(j)
+        list.append(line)
+        j += 1
+    nnodes = int(list[6][5].rstrip('\")\n'))
+    nfaces = int(list[9][6].rstrip('\")\n'))
+    xCoord = [float(i[0]) for i in list[21:21+nnodes]]
+    yCoord = [float(i[1]) for i in list[21:21+nnodes]]
+    # 坐标归一化
+    xmin = min(xCoord)
+    xmax = max(xCoord)
+    ymin = min(yCoord)
+    ymax = max(yCoord)
+    xCoord = [(i-xmin)/(xmax-xmin)for i in xCoord]
+    yCoord = [(i-ymin)/(ymax-ymin)for i in yCoord]
+    Coord = np.vstack((np.array(xCoord), np.array(yCoord)))
+
+    leftcell = []
+    rightcell = []
+    targetpoint = []
+    stencilpoint = []
+    neighbors1 = []
+    neighbors2 = []
+    face_pos.pop(0)
+    face_pos.sort(reverse=True)
+    node1 = []
+    node2 = []
+
+    bctype = []
+    nboundaryface = 0
+    count = 0
+    for i in face_pos:
+        nfaces1 = int(list[i][3], 16) - int(list[i][2], 16) + 1
+        if face_pos.index(i) != len(face_pos) - 1:
+            nboundaryface += nfaces1
+        bctype += [int(list[i][4], 16) for j in range(nfaces1)]
+        if grid_type == 0:
+            node1 += [int(i[0], 16) for i in list[i+1:i+nfaces1]]
+            node2 += [int(i[1], 16) for i in list[i+1:i+nfaces1]]
+            leftcell += [int(i[2], 16) for i in list[i+1:i+nfaces1]]
+            rightcell += [int(i[3], 16) for i in list[i+1:i+nfaces1]]
+
+        elif grid_type == 1:
+            node1 += [int(i[1], 16) for i in list[i+1:i+nfaces1+1]]
+            node2 += [int(i[2], 16) for i in list[i+1:i+nfaces1+1]]
+            leftcell += [int(i[3], 16) for i in list[i+1:i+nfaces1+1]]
+            rightcell += [int(i[4], 16) for i in list[i+1:i+nfaces1+1]]
+        count = count+nfaces1
+    Grid_stack = np.vstack((
+        np.array(node1),
+        np.array(node2),
+        np.array(leftcell),
+        np.array(rightcell),
+        np.array([np.sqrt(pow(xCoord[node1[i]-1] - yCoord[node2[i]-1], 2)
+                          + pow(yCoord[node1[i]-1]-yCoord[node2[i]-1], 2)/sqrt(pow(xmax-xmin, 2)+pow(ymax-ymin, 2)))
+                  for i in range(0, nfaces)]),
+        np.array([i for i in range(0, nfaces)]),
+        np.array(bctype)))
+
+    # AFT_stack = np.vstack((
+    #     np.array(node1[:nboundaryface-1]),
+    #     np.array(node2[:nboundaryface-1]),
+    #     np.array(leftcell[:nboundaryface-1]),
+    #     np.array(rightcell[nboundaryface-1]),
+    #     np.array([np.sqrt(pow(xCoord[node1[i]-1] - yCoord[node2[i]-1], 2)
+    #                       + pow(yCoord[node1[i]-1]-yCoord[node2[i]-1], 2))
+    #               for i in range(0, nboundaryface-1)]),
+    #     np.array([i for i in range(0, nboundaryface)]),
+    #     np.array(bctype[:nboundaryface-1])))
+
+    f2 = open('./edge.csv', 'w+')
+    print('Src,Dst,Weight', file=f2)
+    for i in range(len(node1)):
+        print(node1[i], ',', node2[i], ',', Grid_stack[4][i], file=f2)
+    f2.close()
+
+    f3 = open('./node.csv', 'w+')
+    print('Id,x,y,type', file=f3)  # type : 阵面活跃点 active 阵面目标点target 参考点ref
+    for i in range(len(Coord[0])):
+        if i < nboundaryface-1:
+            print(i+1, ',', Coord[0][i], ',',
+                  Coord[1][i], ',', 1, ',', 0, file=f3)
+        else:
+            print(i+1, ',', Coord[0][i], ',',
+                  Coord[1][i], ',', 0, ',', 1, file=f3)
+    f3.close()
+
+    # 数据提取
+    # 目标点
+    for i in range(nfaces-1):
+        for j in range(nfaces-1):
+            if leftcell[j] == leftcell[i] | rightcell[j] == leftcell[i]:
+                node10fFace = node1[j]
+                node20fFace = node2[j]
+                if node10fFace != node1[i] & node10fFace != node2[i]:
+                    targetpoint[i] = node10fFace
+                if node20fFace != node1[i] & node20fFace != node2[i]:
+                    targetpoint[i] = node20fFace
+
+    # 模板点
+    for i in range(nfaces-1):
+        node1inface = node1[i]
+        for j in range(nfaces-1):
+            if node1[j] == node1inface:
+                neighbors1 = [neighbors1, node2[j]]
+            if node2[j] == node1inface:
+                neighbors1 = [neighbors1, node1[j]]
+        node2inface = node2[i]
+        for j in range(nfaces-1):
+            if node1[j] == node2inface:
+                neighbors2 = [neighbors2, node2[j]]
+            if node2[j] == node2inface:
+                neighbors2 = [neighbors2, node1[j]]
+        picknode1 = 0
+        picknode2 = 0
+        while picknode1 == picknode2:
+            temp = max(random(1, len(neighbors1)))
+            while neighbors1[temp] == node2inface:
+                temp = max(random(1, len(neighbors1)))
+            picknode1 = neighbors1[temp]
+
+            temp = max(random(1, len(neighbors2)))
+            while neighbors2[temp] == node1inface:
+                temp = max(random(1, len(neighbors2)))
+            picknode2 = neighbors2[temp]
+        stencilpoint[i] = [picknode1, node1inface, node2inface, picknode2]
+    for i in range(nfaces-1):
+        plt.plot(xCoord[targetpoint[i]], yCoord[targetpoint[i]], 'o')
+        x = xCoord[stencilpoint[i]]
+        y = yCoord[stencilpoint[i]]
+        plt.plot(x, y, '-*')
+        plt.show()
+    f.close()
+
+
+def read_file_binary(file_path):
+    with open(file_path, 'r+b') as f:
+        # i = f.seek(931972, 0)
+        # list = f.readlines()
+        print(f)
+        f.close()
+
+
+def ShowGraph(graph, nodeLabel, EdgeLabel):
+    plt.figure(figsize=(8, 8))
+    # 转换 dgl graph to networks
+    G = dgl.to_networkx(graph)
+
+    nx.draw(G, node_size=1, with_labels=False)  # 画图，设置节点大小
+    plt.show()
+
+
+if __name__ == '__main__':
+    read_file_cas(file_path, grid_type)
+    # read_file_binary(file_path)
